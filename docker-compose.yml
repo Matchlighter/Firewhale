@@ -1,0 +1,16 @@
+---
+version: "3.6"
+
+services:
+  firewhale:
+    # image: firewhale
+    cap_add:
+      - NET_ADMIN
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./:/code/
+      - /var/run/docker.sock:/var/run/docker.sock
