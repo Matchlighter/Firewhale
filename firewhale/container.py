@@ -9,12 +9,39 @@ from functools import cached_property
 from .nf import *
 from .base import TABLE_FILTER, CONTAINER_CHAIN_SPECS
 from .rule import make_nft_rule, normalize_rule
+from .watcher import RedisSubscriptionManager
 
 class Container:
     def __init__(self, dcontainer: docker.models.containers.Container) -> None:
         self.docker_container = dcontainer
 
-    def apply_rules(self):
+    def handle_event(self, event: str, rsm: RedisSubscriptionManager = None):
+        if event == "create":
+            if rsm:
+                rsm.add_service_ips(self.service_name, self.docker_container)
+            self.apply_rules(rsm)
+        elif event == "destroy":
+            if rsm:
+                rsm.remove_service_ips(self.service_name, self.docker_container)
+            self.destroy_rules(rsm)
+
+    def publish_ips(self):
+        # SELECT * WHERE ip IN ips AND container_id <> self.id;
+        # UPSERT
+        # SELECT * WHERE container_id = cid AND timestamp >= pre_timestamp;
+        # Publish unlink notifications from 1 and create notifications from 2
+        pass
+
+    def unpublish_ips(self):
+        # SELECT service, ip FROM service_links WHERE container_id = self.id;
+        # DELETE FROM service_links WHERE ip = $1 AND service = $2
+        # Publish notifications
+        pass
+
+    def apply_rules(self, rsm: RedisSubscriptionManager = None):
+        if "host" in self.container.attrs["NetworkSettings"]["Networks"]:
+            raise ValueError("Container is running in host network mode")
+
         if not self.firewhale_enabled(): return
 
         addrs = self.container_ips()
@@ -71,12 +98,14 @@ class Container:
             for nfr in nft_rules:
                 commands.append({ "add": { "rule": nfr } })
 
-        # TODO Subscribe to watched_services
+        if rsm:
+            for svc in watched_services:
+                rsm.subscribe_service(svc, self.id)
 
         nfc(commands)
 
-    def destroy_rules(self):
-        # TODO Unsubscribe from watched_services
+    def destroy_rules(self, rsm: RedisSubscriptionManager = None):
+        if not self.firewhale_enabled(): return
 
         commands = []
 
@@ -100,6 +129,8 @@ class Container:
 
         nfc(commands)
 
+        if rsm: rsm.unsubscribe_all_services(self.id)
+
     def firewhale_enabled(self):
         return self.firewhale_config.get("enabled", False)
 
@@ -107,6 +138,13 @@ class Container:
         return [
             net["IPAddress"] for net in self.docker_container.attrs["NetworkSettings"]["Networks"].values()
         ]
+
+    @cached_property
+    def service_name(self):
+        for k in ["firewhale.service_name", "com.docker.swarm.service.name", "com.docker.compose.service"]:
+            if k in self.docker_container.labels:
+                return self.docker_container.labels[k]
+        return self.docker_container.attrs["Name"].lstrip("/")
 
     @cached_property
     def firewhale_config(self):
@@ -128,12 +166,13 @@ class Container:
 def cleanup_unknown_containers():
     MAPS_REMOVE_BY_IP = True
 
-    running_containers = [Container(c) for c in docker.from_env().containers.list()]
-    running_containers = [c for c in running_containers if c.firewhale_enabled()]
+    active_containers = [Container(c) for c in docker.from_env().containers.list(
+        all=True, filters={ "label": "firewhale.enabled=true" },
+    )]
 
     if MAPS_REMOVE_BY_IP:
         mapped_ips = set(ip for ip, v in get_map_elements("ip", "filter", CONTAINER_CHAIN_SPECS[0].map_name).items())
-        running_ips = set(ip for c in running_containers for ip in c.container_ips())
+        running_ips = set(ip for c in active_containers for ip in c.container_ips())
         dead_ips = mapped_ips - running_ips
         if dead_ips:
             for cdef in CONTAINER_CHAIN_SPECS:
@@ -159,7 +198,7 @@ def cleanup_unknown_containers():
                     by_container_id[cid].append(ip)
             return map_cache.get(cid, [])
 
-    running_container_ids = set(c.id for c in running_containers)
+    running_container_ids = set(c.id for c in active_containers)
 
     # List Chains with container prefix
     container_chains = [ch for ch in list_table_chains("ip", "filter") if ch["name"].startswith("firewhale-container-")]

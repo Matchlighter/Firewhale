@@ -5,6 +5,11 @@ from nftables import Nftables
 nft = Nftables()
 nft.set_json_output(True)
 
+# TODO To work in swarm, we need to share events to Redis. To do that, we need to be connected on an Overlay network.
+# However, we can't connect to an overlay network from a container running in host network mode.
+# The best solution seems to be to create a small service that runs on "host" and connects to the primary service on
+#   the overlay network via a unix socket on a shared volume.
+
 class NftError(Exception):
     pass
 

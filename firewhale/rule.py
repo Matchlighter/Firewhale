@@ -9,6 +9,9 @@ ALIASES = {
     "dport": "dst_port",
 }
 
+def nft_service_set_name(service: str):
+    return f"firewhale-service:{service}:ip"
+
 # Rule: { peer, src_port, dst_port, proto, jump }
 #   tcp; caddy.caddy; 80; srcport:8000-9000; jump:xyz-chain
 def normalize_rule(rule):
@@ -44,6 +47,13 @@ def normalize_rule(rule):
 
     return norm_rule
 
+def full_network_name(container: docker.models.containers.Container, net_name: str):
+    if net_name == "default":
+        for k in ["com.docker.compose.project", "com.docker.stack.namespace"]:
+            if k in container.labels:
+                return container.labels[k] + "_default"
+    return net_name
+
 def make_nft_rule(rule, container: docker.models.containers.Container, *,
     chain=None,
     addr_type: str,
@@ -73,15 +83,20 @@ def make_nft_rule(rule, container: docker.models.containers.Container, *,
         elif re.match(r"^\*\.\w+$", peer):
             # Network
             _, net_name = peer.split(".")
+            net_name = full_network_name(container, net_name)
             nets = container.attrs["NetworkSettings"]["Networks"]
             if net_name not in nets:
                 raise ValueError(f"Network {net_name} not found")
             net = net[net_name]
             m["right"] = { "prefix": { "addr": net["IPAddress"], "length": net["IPPrefixLen"] } }
         elif re.match(r"^\w+\.\w+$", peer):
-            # Service
+            # Service (Service Name in Swarm/Compose - otherwise Container Name)
+            service_name, net_name = peer.split(".")
+            net_name = full_network_name(container, net_name)
+            peer = f"{service_name}.{net_name}"
             referenced_services.add(peer)
-            m["right"] = f"@firewhale-services:{peer}"
+            set_name = nft_service_set_name(peer)
+            m["right"] = f"@firewhale-services:{set_name}"
         elif re.match(r"^\d+\.\d+\.\d+\.\d+(?:\/\d+)$", peer):
             # IP/CIDR
             ip, prefix = peer.split("/")
