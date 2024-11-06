@@ -16,7 +16,9 @@ def run(
 @app.command()
 def nfagent():
     """ Run Firewhale's NFAgent - a small service to handle proxying NFTables commands from inside to outside Swarm """
-    pass
+    from .serve import serve_nfagent
+    import asyncio
+    asyncio.run(serve_nfagent())
 
 @app.command("full-cleanup")
 def full_cleanup():

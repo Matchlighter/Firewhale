@@ -3,7 +3,7 @@ from typing import Literal
 from .nfbackends import nf_backend_store
 
 def nfc(cmd, *, throw: bool | Literal["continue"] = True):
-    nf_backend_store.current_backend.cmd(cmd, throw=throw)
+    return nf_backend_store.current_backend.cmd(cmd, throw=throw)
 
 
 def _extract_fq_table(*args):

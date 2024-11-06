@@ -13,10 +13,11 @@ setup(
         'ansibleguy-nftables',
         'docker',
         'pyyaml',
+        'websockets',
     ],
     entry_points={
         'console_scripts': [
-            'firewhale = firewhale:main'
+            'firewhale = firewhale.cli:app'
         ]
     }
 )

@@ -1,6 +1,4 @@
 ---
-version: "3.6"
-
 services:
   firewhale:
     # image: firewhale

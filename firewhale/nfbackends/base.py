@@ -10,6 +10,13 @@ class NftError(Exception):
 class NFTBackend:
     def __init__(self):
         self._lock = Lock()
+        self.on_connect = None
+
+    def connect(self):
+        self.on_connect()
+
+    def stop(self):
+        pass
 
     def __enter__(self):
         self._lock.acquire()
