@@ -17,44 +17,34 @@ def is_in_swarm():
     import docker
     return docker.from_env().info().get("Swarm", {}).get("LocalNodeState") == "active"
 
-def full_rule_sync(publish_ips=False):
-    if nf_backend_store.connected:
-        from .base import initialize_core_chains
-        from .container import sync_all_containers, cleanup_unknown_containers
-
-        initialize_core_chains()
-        sync_all_containers(ips=publish_ips)
-        cleanup_unknown_containers()
-
-
 async def serve_nfagent():
     import json
     import asyncio
     import websockets as ws
     from websockets.asyncio.client import unix_connect
-    print("Starting NFAgent")
 
-    from .nfbackends import nf_backend_store
     from .nfbackends.base import NftError
     from .nfbackends.local import LocalNFTBackend
-    from .nf import nfc
-    nf_backend_store.set_backend(LocalNFTBackend())
+
+    print("Starting NFAgent and connecting to Firewhale")
+
+    nfb = LocalNFTBackend()
 
     async def handle_socket(socket: ws.client.ClientConnection):
         while True:
             try:
                 message = await socket.recv()
                 m = json.loads(message)
-                if "cmd" in m:
+                if "nfcmd" in m:
                     try:
                         print(m["cmd"])
-                        result = nfc(m["cmd"], throw=m.get("throw", True))
+                        result = nfb.cmd(m["cmd"], throw=m.get("throw", True))
                         result = { "status": "ok", "data": result }
                     except NftError as e:
                         result = { "status": "error", "data": str(e) }
                     await socket.send(json.dumps(result))
             except ws.ConnectionClosed as e:
-                print("Connection closed", e)
+                print("Disconnected from Firewhale", e)
                 break
 
     while True:
@@ -63,7 +53,7 @@ async def serve_nfagent():
                 print("Connected to Firewhale")
                 await handle_socket(socket)
         except Exception as e:
-            print("Error connecting to NFAgent", e)
+            print("Error connecting to Firewhale", e)
             await asyncio.sleep(3)
 
 
@@ -89,6 +79,11 @@ def serve(nfagent=None, redis_url=None):
         mode = "Local"
     print(f"Starting Firewhale in {mode} mode")
 
+    q = Queue[QItem]()
+
+
+    # === IPSetManager Setup ===
+
     # If in Swarm or Redis was manually asked for, Connect to Redis and create an RSM
     ipmanager = None
     if redis_url:
@@ -102,7 +97,8 @@ def serve(nfagent=None, redis_url=None):
 
     IPSetManager.instance = ipmanager
 
-    q = Queue[QItem]()
+
+    # === NFBackend Setup ===
 
     if nfagent:
         from .nfbackends.socket import SocketNFTBackend
@@ -114,6 +110,17 @@ def serve(nfagent=None, redis_url=None):
         nf_backend_store.set_backend(nf_backend)
 
     nf_backend.on_connect = lambda: q.put(QItem("nfbackend", "connected"))
+
+    def handle_nf_connected():
+        from .base import initialize_core_chains
+        from .container import sync_all_containers, cleanup_unknown_containers
+
+        initialize_core_chains()
+        sync_all_containers(ips=False)
+        cleanup_unknown_containers()
+
+
+    # === Docker Event Handling ===
 
     # Subscribe to Docker Container events `create` and `destroy` events
     #   If Redis, also publish events to Redis
@@ -128,25 +135,20 @@ def serve(nfagent=None, redis_url=None):
 
     def process_docker_event(event):
         from .container import Container
-
-        try:
-            if event["Type"] == "container":
-                ctr = Container(event["id"])
-                ctr.handle_event(event["Action"])
-        except Exception as e:
-            import traceback
-            # TODO Better loggering
-            print(f"Error processing event {event}:")
-            traceback.print_exc()
+        if event["Type"] == "container":
+            ctr = Container(event["id"])
+            ctr.handle_event(event["Action"])
 
     def process_docker_events(events):
         for event in events:
             q.put(QItem("docker", event))
-            # process_docker_event(event)
 
     event_thread = Thread(target=process_docker_events, args=(events_handle,))
     print("Firewhale is subscribed to local Docker events")
     event_thread.start()
+
+
+    # === Main Program ===
 
     try:
         from .container import sync_all_containers
@@ -156,10 +158,19 @@ def serve(nfagent=None, redis_url=None):
 
         while True:
             qitem = q.get()
-            if qitem.type == "docker":
-                process_docker_event(qitem.data)
-            elif qitem.type == "nfbackend":
-                full_rule_sync()
+
+            try:
+                if qitem.type == "docker":
+                    process_docker_event(qitem.data)
+
+                elif qitem.type == "nfbackend" and qitem.data == "connected":
+                    handle_nf_connected()
+
+            except Exception as e:
+                import traceback
+                # TODO Better loggering
+                print(f"Error:")
+                traceback.print_exc()
 
             q.task_done()
 

@@ -56,7 +56,7 @@ class SocketNFTBackend(NFTBackend):
 
         with self.socket_lock:
             self.current_connection.send(json.dumps({
-                "cmd": cmd,
+                "nfcmd": cmd,
                 "throw": throw,
             }))
 
