@@ -4,13 +4,36 @@ version: "3.6"
 services:
   firewhale:
     # image: firewhale
-    cap_add:
-      - NET_ADMIN
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "5000:5000"
+    command: firewhale run
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
     volumes:
       - ./:/code/
       - /var/run/docker.sock:/var/run/docker.sock
+      - agent:/tmp/firewhale/agent
+
+  nfagent:
+    # image: firewhale
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: firewhale nfagent
+    cap_add:
+      - NET_ADMIN
+    network_mode: host
+    depends_on:
+      - firewhale
+    volumes:
+      - ./:/code/
+      - agent:/tmp/firewhale/agent
+
+  redis:
+    image: redis:alpine
+
+volumes:
+  agent:

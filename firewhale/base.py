@@ -140,25 +140,37 @@ def initialize_core_chains():
 def full_cleanup():
     # TODO Ignore errors and continue cleaning
 
-    # Remove the Firewhale Rules from the DOCKER-USER chain
-    removeTaggedRulesFromChain(DOCKER_USER_CHAIN, "[firewhale]")
+    print("Removing Firewhale Rules from DOCKER-USER chain")
+    try:
+        removeTaggedRulesFromChain(DOCKER_USER_CHAIN, "[firewhale]")
+    except:
+        pass
 
-    # Clear and Delete the Firewhale chain
-    nfc([
-        { "flush": { "chain": FIREWHALE_CHAIN } },
-        { "delete": { "chain": FIREWHALE_CHAIN } },
-    ])
+    print("Removing Firewhale Chain")
+    try:
+        nfc([
+            { "flush": { "chain": FIREWHALE_CHAIN } },
+            { "delete": { "chain": FIREWHALE_CHAIN } },
+        ])
+    except:
+        pass
 
-    # Clear and Delete the Container chain maps
-    chain_maps = [{ "family": "ip", "table": "filter", "name": cdef.map_name } for cdef in CONTAINER_CHAIN_SPECS]
-    nfc([
-        *({ "flush": { "map": m } } for m in chain_maps ),
-        *({ "delete": { "map": m } } for m in chain_maps ),
-    ])
+    print("Removing Container Chain Maps")
+    try:
+        chain_maps = [{ "family": "ip", "table": "filter", "name": cdef.map_name } for cdef in CONTAINER_CHAIN_SPECS]
+        nfc([
+            *({ "flush": { "map": m } } for m in chain_maps ),
+            *({ "delete": { "map": m } } for m in chain_maps ),
+        ], throw="continue")
+    except:
+        pass
 
-    # Clear and Delete the Container chains
-    container_chains = [ch for ch in list_table_chains("ip", "filter") if ch["name"].startswith("firewhale-container-")]
-    nfc([
-        *( { "flush": { "chain": chain } } for chain in container_chains ),
-        *( { "delete": { "chain": chain } } for chain in container_chains ),
-    ])
+    print("Removing Container Chains")
+    try:
+        container_chains = [ch for ch in list_table_chains("ip", "filter") if ch["name"].startswith("firewhale-container-")]
+        nfc([
+            *( { "flush": { "chain": chain } } for chain in container_chains ),
+            *( { "delete": { "chain": chain } } for chain in container_chains ),
+        ], throw="continue")
+    except:
+        pass

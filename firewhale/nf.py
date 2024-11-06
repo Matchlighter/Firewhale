@@ -1,39 +1,10 @@
 
-import json
-from nftables import Nftables
+from typing import Literal
+from .nfbackends import nf_backend_store
 
-nft = Nftables()
-nft.set_json_output(True)
+def nfc(cmd, *, throw: bool | Literal["continue"] = True):
+    nf_backend_store.current_backend.cmd(cmd, throw=throw)
 
-# TODO To work in swarm, we need to share events to Redis. To do that, we need to be connected on an Overlay network.
-# However, we can't connect to an overlay network from a container running in host network mode.
-# The best solution seems to be to create a small service that runs on "host" and connects to the primary service on
-#   the overlay network via a unix socket on a shared volume.
-
-class NftError(Exception):
-    pass
-
-def nfc(cmd, *, throw=True):
-    if isinstance(cmd, list):
-        cmd = { "nftables": cmd }
-
-    if isinstance(cmd, dict):
-        if "nftables" not in cmd:
-            cmd = { "nftables": [cmd] }
-        rc, output, error = nft.json_cmd(cmd)
-    else:
-        rc, output, error = nft.cmd(cmd)
-
-    if rc != 0 and throw:
-        raise NftError(error)
-
-    if nft.get_json_output() and isinstance(output, str) and output != "":
-        output = json.loads(output)
-
-    if isinstance(output, dict):
-        output = output["nftables"]
-
-    return output
 
 def _extract_fq_table(*args):
     if len(args) == 1:

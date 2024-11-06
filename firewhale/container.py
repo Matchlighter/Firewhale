@@ -9,40 +9,46 @@ from functools import cached_property
 from .nf import *
 from .base import TABLE_FILTER, CONTAINER_CHAIN_SPECS
 from .rule import make_nft_rule, normalize_rule
-from .watcher import RedisSubscriptionManager
+from .ipmanager import IPSetManager
+from .util import protected
+
 
 class Container:
-    def __init__(self, dcontainer: docker.models.containers.Container) -> None:
-        self.docker_container = dcontainer
+    def __init__(self, container_id: str | docker.models.containers.Container) -> None:
+        if isinstance(container_id, docker.models.containers.Container):
+            self.docker_container = container_id
+            container_id = container_id.id
 
-    def handle_event(self, event: str, rsm: RedisSubscriptionManager = None):
+        self.container_id = container_id
+
+    def handle_event(self, event: str):
         if event == "create":
-            if rsm:
-                rsm.add_service_ips(self.service_name, self.docker_container)
-            self.apply_rules(rsm)
-        elif event == "destroy":
-            if rsm:
-                rsm.remove_service_ips(self.service_name, self.docker_container)
-            self.destroy_rules(rsm)
+            self.apply_rules()
+            self.publish_ips()
+        elif event == "die":
+            self.destroy_rules()
+            self.unpublish_ips()
 
     def publish_ips(self):
-        # SELECT * WHERE ip IN ips AND container_id <> self.id;
-        # UPSERT
-        # SELECT * WHERE container_id = cid AND timestamp >= pre_timestamp;
-        # Publish unlink notifications from 1 and create notifications from 2
-        pass
+        if not self.firewhale_config.get("publish_ips", True):
+            return
+
+        docker_nets = self.docker_container.attrs["NetworkSettings"]["Networks"]
+        for net_name, net_cfg in docker_nets.items():
+            service = f"{self.service_name}.{net_name}"
+            self.service_manager.add_service_ip(service, net_cfg["IPAddress"], self.id)
 
     def unpublish_ips(self):
-        # SELECT service, ip FROM service_links WHERE container_id = self.id;
-        # DELETE FROM service_links WHERE ip = $1 AND service = $2
-        # Publish notifications
-        pass
+        self.service_manager.del_container_ips(self.id)
 
-    def apply_rules(self, rsm: RedisSubscriptionManager = None):
-        if "host" in self.container.attrs["NetworkSettings"]["Networks"]:
+    @protected("Failed to apply rules")
+    def apply_rules(self):
+        if not self.firewhale_enabled(): return
+
+        if "host" in self.docker_container.attrs["NetworkSettings"]["Networks"]:
             raise ValueError("Container is running in host network mode")
 
-        if not self.firewhale_enabled(): return
+        print(f"Applying rules for container {self.id} ({self.service_name})")
 
         addrs = self.container_ips()
         watched_services = set()
@@ -98,38 +104,43 @@ class Container:
             for nfr in nft_rules:
                 commands.append({ "add": { "rule": nfr } })
 
-        if rsm:
-            for svc in watched_services:
-                rsm.subscribe_service(svc, self.id)
+        for svc in watched_services:
+            self.service_manager.subscribe_service(svc, self.id)
 
         nfc(commands)
 
-    def destroy_rules(self, rsm: RedisSubscriptionManager = None):
-        if not self.firewhale_enabled(): return
+    @protected("Failed to destroy rules")
+    def destroy_rules(self):
+        # if not self.firewhale_enabled(): return # Not available after container is destroyed
 
         commands = []
 
-        addrs = self.container_ips()
-        for cdef in CONTAINER_CHAIN_SPECS:
-            # Remove Container-specific Chains from Maps
-            commands.append({ "delete": { "element": {
-                "family": "ip",
-                "table": TABLE_FILTER,
-                "name": cdef.map_name,
-                "elem": addrs,
-            }}})
-
-        # Remove Container-specific Chains
+        # TODO Make this more efficient rather than listing all chains
         cont_chains = [ch for ch in list_table_chains("ip", "filter") if ch["name"].startswith(self.chain_prefix)]
-        for chain in cont_chains:
-            # Remove all Rules from the Chain
-            commands.append({ "flush": { "chain": chain }})
-            # Delete the Chain
-            commands.append({ "delete": { "chain": chain }})
 
-        nfc(commands)
+        if cont_chains:
+            print(f"Removing rules for container {self.id}")
 
-        if rsm: rsm.unsubscribe_all_services(self.id)
+            addrs = self.service_manager.list_container_ips(self.id)
+            for cdef in CONTAINER_CHAIN_SPECS:
+                # Remove Container-specific Chains from Maps
+                commands.append({ "delete": { "element": {
+                    "family": "ip",
+                    "table": TABLE_FILTER,
+                    "name": cdef.map_name,
+                    "elem": addrs,
+                }}})
+
+            # Remove Container-specific Chains
+            for chain in cont_chains:
+                # Remove all Rules from the Chain
+                commands.append({ "flush": { "chain": chain }})
+                # Delete the Chain
+                commands.append({ "delete": { "chain": chain }})
+
+            nfc(commands)
+
+        self.service_manager.unsubscribe_all_services(self.id)
 
     def firewhale_enabled(self):
         return self.firewhale_config.get("enabled", False)
@@ -139,12 +150,20 @@ class Container:
             net["IPAddress"] for net in self.docker_container.attrs["NetworkSettings"]["Networks"].values()
         ]
 
+    @property
+    def service_manager(self):
+        return IPSetManager.instance
+
     @cached_property
     def service_name(self):
         for k in ["firewhale.service_name", "com.docker.swarm.service.name", "com.docker.compose.service"]:
             if k in self.docker_container.labels:
                 return self.docker_container.labels[k]
         return self.docker_container.attrs["Name"].lstrip("/")
+
+    @cached_property
+    def docker_container(self):
+        return docker.from_env().containers.get(self.container_id)
 
     @cached_property
     def firewhale_config(self):
@@ -157,13 +176,23 @@ class Container:
 
     @property
     def id(self):
-        return self.docker_container.id[0:16]
+        return self.container_id[0:16]
 
     @property
     def chain_prefix(self):
         return f"firewhale-container-{self.id}"
 
+def sync_all_containers(rules = True, ips = True):
+    """ Applies NFTables Rules for all Containers """
+    active_containers = [Container(c) for c in docker.from_env().containers.list(
+        all=True,
+    )]
+    for container in active_containers:
+        if rules: container.apply_rules()
+        if ips: container.publish_ips()
+
 def cleanup_unknown_containers():
+    """ Cleans up NFTables Rules, Chains and Maps for Containers that no longer exist """
     MAPS_REMOVE_BY_IP = True
 
     active_containers = [Container(c) for c in docker.from_env().containers.list(
