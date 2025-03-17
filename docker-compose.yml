@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: firewhale run
+    command: firewhale run --nfagent
     environment:
       - REDIS_URL=redis://redis:6379
     depends_on:

@@ -1,0 +1,10 @@
+---
+services:
+  firewhale:
+    image: ghcr.io/matchlighter/firewhale:latest
+    command: firewhale run
+    cap_add:
+      - NET_ADMIN
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

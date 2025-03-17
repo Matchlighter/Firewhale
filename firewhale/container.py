@@ -79,7 +79,7 @@ class Container:
                 }}}
             ])
 
-            cfg_rules = self.firewhale_config.get(cdef.config_entry, [])
+            cfg_rules = self.firewhale_config.get(f"{cdef.config_entry}-rules", [])
             if isinstance(cfg_rules, str):
                 cfg_rules = [cfg_rules]
             norm_rules = [normalize_rule(rule) for rule in cfg_rules]

@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 
 setup(
     name='firewhale',
@@ -8,7 +8,10 @@ setup(
     author='Matchlighter',
     author_email='ml@matchlighter.net',
     license='MIT',
-    packages=['firewhale'],
+    packages=find_packages(),
+    package_data= {
+        '': ['redis/*.lua'],
+    },
     install_requires=[
         'ansibleguy-nftables',
         'docker',

@@ -1,5 +1,6 @@
 
 import os
+import signal
 from threading import Thread
 from queue import Queue
 from dataclasses import dataclass
@@ -8,9 +9,10 @@ from typing import Literal, Any
 from .ipmanager.base import IPSetManager
 from .nfbackends import nf_backend_store
 
+
 @dataclass
 class QItem:
-    type: Literal["docker"] | Literal["nfbackend"]
+    type: Literal["docker"] | Literal["nfbackend"] | Literal["stop"]
     data: Any
 
 def is_in_swarm():
@@ -28,7 +30,19 @@ async def serve_nfagent():
 
     print("Starting NFAgent and connecting to Firewhale")
 
+    conns: set[ws.client.ClientConnection] = set()
+
     nfb = LocalNFTBackend()
+
+    do_quit = False
+    def handle_exit_signal(self,signum, frame):
+        nonlocal do_quit
+        for conn in conns:
+            conn.close()
+        do_quit = True
+
+    signal.signal(signal.SIGINT, handle_exit_signal)
+    signal.signal(signal.SIGTERM, handle_exit_signal)
 
     async def handle_socket(socket: ws.client.ClientConnection):
         while True:
@@ -37,8 +51,8 @@ async def serve_nfagent():
                 m = json.loads(message)
                 if "nfcmd" in m:
                     try:
-                        print(m["cmd"])
-                        result = nfb.cmd(m["cmd"], throw=m.get("throw", True))
+                        print(m["nfcmd"])
+                        result = nfb.cmd(m["nfcmd"], throw=m.get("throw", True))
                         result = { "status": "ok", "data": result }
                     except NftError as e:
                         result = { "status": "error", "data": str(e) }
@@ -46,12 +60,22 @@ async def serve_nfagent():
             except ws.ConnectionClosed as e:
                 print("Disconnected from Firewhale", e)
                 break
+            except Exception as e:
+                print("NFAgent Error", e)
 
     while True:
         try:
             async with unix_connect("/tmp/firewhale/agent/socket") as socket:
-                print("Connected to Firewhale")
-                await handle_socket(socket)
+                try:
+                    print("Connected to Firewhale")
+                    conns.add(socket)
+                    await handle_socket(socket)
+                finally:
+                    conns.remove(socket)
+
+            if do_quit:
+                break
+
         except Exception as e:
             print("Error connecting to Firewhale", e)
             await asyncio.sleep(3)
@@ -80,7 +104,6 @@ def serve(nfagent=None, redis_url=None):
     print(f"Starting Firewhale in {mode} mode")
 
     q = Queue[QItem]()
-
 
     # === IPSetManager Setup ===
 
@@ -147,6 +170,10 @@ def serve(nfagent=None, redis_url=None):
     print("Firewhale is subscribed to local Docker events")
     event_thread.start()
 
+    def handle_exit_signal(self,signum, frame):
+        q.put(QItem("stop", None))
+    signal.signal(signal.SIGINT, handle_exit_signal)
+    signal.signal(signal.SIGTERM, handle_exit_signal)
 
     # === Main Program ===
 
@@ -165,6 +192,9 @@ def serve(nfagent=None, redis_url=None):
 
                 elif qitem.type == "nfbackend" and qitem.data == "connected":
                     handle_nf_connected()
+
+                elif qitem.type == "stop":
+                    break
 
             except Exception as e:
                 import traceback

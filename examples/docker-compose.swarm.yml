@@ -1,0 +1,49 @@
+---
+services:
+  firewhale:
+    image: ghcr.io/matchlighter/firewhale:latest
+    command: firewhale run
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - agent:/tmp/firewhale/agent
+    networks:
+      - firewhale
+    deploy:
+      mode: global
+
+  nfagent:
+    image: ghcr.io/matchlighter/firewhale:latest
+    command: firewhale nfagent
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - firewhale
+    volumes:
+      - agent:/tmp/firewhale/agent
+    networks:
+      - host
+    deploy:
+      mode: global
+
+  redis_service:
+    image: redis:alpine
+    hostname: redis
+    networks:
+      - firewhale
+    deploy:
+      placement:
+        constraints:
+          - node.hostname == docker02
+
+volumes:
+  agent:
+
+networks:
+  firewhale:
+  host:
+    external:
+      name: "host"

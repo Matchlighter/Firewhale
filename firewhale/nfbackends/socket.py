@@ -20,15 +20,22 @@ class SocketNFTBackend(NFTBackend):
         self.server_thread = None
 
     def connect(self):
+        self.clean_socket()
         self.ws_server = unix_serve(self.ws_server_handler, self.socket_path)
         self.server_thread = threading.Thread(target=lambda: self.ws_server.serve_forever(), daemon=True)
         self.server_thread.start()
 
     def stop(self):
         if self.ws_server is not None:
-            os.unlink(self.socket_path)
+            self.clean_socket()
             self.ws_server.shutdown()
             self.server_thread.join()
+
+    def clean_socket(self):
+        try:
+            os.unlink(self.socket_path)
+        except FileNotFoundError:
+            pass
 
     def ws_server_handler(self, sock: ws.server.ServerConnection):
         if self.current_connection is not None:
