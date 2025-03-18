@@ -1,6 +1,7 @@
 
 import os
 import signal
+import traceback
 from threading import Thread
 from queue import Queue
 from dataclasses import dataclass
@@ -35,11 +36,11 @@ async def serve_nfagent():
     nfb = LocalNFTBackend()
 
     do_quit = False
-    def handle_exit_signal(self,signum, frame):
+    def handle_exit_signal(self,signum, frame=None):
         nonlocal do_quit
+        do_quit = True
         for conn in conns:
             conn.close()
-        do_quit = True
 
     signal.signal(signal.SIGINT, handle_exit_signal)
     signal.signal(signal.SIGTERM, handle_exit_signal)
@@ -51,17 +52,19 @@ async def serve_nfagent():
                 m = json.loads(message)
                 if "nfcmd" in m:
                     try:
-                        print(m["nfcmd"])
+                        print(json.dumps(m["nfcmd"]))
                         result = nfb.cmd(m["nfcmd"], throw=m.get("throw", True))
                         result = { "status": "ok", "data": result }
                     except NftError as e:
                         result = { "status": "error", "data": str(e) }
+                        print("NFTables Error:", e)
                     await socket.send(json.dumps(result))
             except ws.ConnectionClosed as e:
                 print("Disconnected from Firewhale", e)
                 break
             except Exception as e:
-                print("NFAgent Error", e)
+                print("NFAgent Error:")
+                print(traceback.format_exc())
 
     while True:
         try:
@@ -112,14 +115,13 @@ def serve(nfagent=None, redis_url=None):
     if redis_url:
         import redis
         from .ipmanager.redis import RedisSubscriptionManager
-        r = redis.from_url(redis_url)
-        ipmanager = RedisSubscriptionManager(r)
+        r = redis.from_url(redis_url, decode_responses=True)
+        ipmanager = RedisSubscriptionManager(r, docker_client.info()["ID"])
     else:
         from .ipmanager.local import LocalSubscriptionManager
         ipmanager = LocalSubscriptionManager()
 
     IPSetManager.instance = ipmanager
-
 
     # === NFBackend Setup ===
 
@@ -138,9 +140,15 @@ def serve(nfagent=None, redis_url=None):
         from .base import initialize_core_chains
         from .container import sync_all_containers, cleanup_unknown_containers
 
+        print("Initializing core chains")
         initialize_core_chains()
-        sync_all_containers(ips=False)
+        print("Syncing containers")
+        sync_all_containers(ips=False) # (IPs handled below)
+        print("Cleaning old IPs")
+        ipmanager.del_unknown_ips()
+        print("Cleaning up unknown containers")
         cleanup_unknown_containers()
+        print("NFtables initialized")
 
 
     # === Docker Event Handling ===
@@ -152,7 +160,7 @@ def serve(nfagent=None, redis_url=None):
         decode=True,
         filters={
             "type": ["container"],
-            "event": ["create", "die"],
+            "event": ["create", "start", "die"],
         }
     )
 
@@ -170,7 +178,7 @@ def serve(nfagent=None, redis_url=None):
     print("Firewhale is subscribed to local Docker events")
     event_thread.start()
 
-    def handle_exit_signal(self,signum, frame):
+    def handle_exit_signal(self,signum, frame=None):
         q.put(QItem("stop", None))
     signal.signal(signal.SIGINT, handle_exit_signal)
     signal.signal(signal.SIGTERM, handle_exit_signal)
@@ -179,7 +187,7 @@ def serve(nfagent=None, redis_url=None):
 
     try:
         from .container import sync_all_containers
-        sync_all_containers(rules=False)
+        sync_all_containers(rules=False) # (Rules handled above)
 
         nf_backend.connect()
 

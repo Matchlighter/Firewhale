@@ -7,6 +7,7 @@ import yaml
 from functools import cached_property
 
 from .nf import *
+from .nfbackends.base import NftError
 from .base import TABLE_FILTER, CONTAINER_CHAIN_SPECS
 from .rule import make_nft_rule, normalize_rule
 from .ipmanager import IPSetManager
@@ -22,7 +23,8 @@ class Container:
         self.container_id = container_id
 
     def handle_event(self, event: str):
-        if event == "create":
+        print(f"Container {self.id} ({self.service_name}) {event}")
+        if event == "create" or event == "start":
             self.apply_rules()
             self.publish_ips()
         elif event == "die":
@@ -35,13 +37,15 @@ class Container:
 
         docker_nets = self.docker_container.attrs["NetworkSettings"]["Networks"]
         for net_name, net_cfg in docker_nets.items():
+            ip = net_cfg["IPAddress"]
+            if not ip: continue
             service = f"{self.service_name}.{net_name}"
-            self.service_manager.add_service_ip(service, net_cfg["IPAddress"], self.id)
+            self.service_manager.add_service_ip(service, ip, self.id)
 
     def unpublish_ips(self):
         self.service_manager.del_container_ips(self.id)
 
-    @protected("Failed to apply rules")
+    @protected("Failed to apply rules", short=[NftError])
     def apply_rules(self):
         if not self.firewhale_enabled(): return
 
@@ -53,6 +57,8 @@ class Container:
         addrs = self.container_ips()
         watched_services = set()
         commands = []
+
+        if not any(addrs): return
 
         for cdef in CONTAINER_CHAIN_SPECS:
             cname = f"{self.chain_prefix}-{cdef.name}"
@@ -86,7 +92,7 @@ class Container:
 
             nft_rules = [
                 make_nft_rule(
-                    rule, self.docker_container,
+                    rule, self,
                     addr_type=cdef.rel_addr,
                     chain=nfchain,
                     force_counter=False,
@@ -121,15 +127,16 @@ class Container:
         if cont_chains:
             print(f"Removing rules for container {self.id}")
 
-            addrs = self.service_manager.list_container_ips(self.id)
-            for cdef in CONTAINER_CHAIN_SPECS:
-                # Remove Container-specific Chains from Maps
-                commands.append({ "delete": { "element": {
-                    "family": "ip",
-                    "table": TABLE_FILTER,
-                    "name": cdef.map_name,
-                    "elem": addrs,
-                }}})
+            addrs = list(self.service_manager.list_container_ips(self.id))
+            if any(addrs):
+                for cdef in CONTAINER_CHAIN_SPECS:
+                    # Remove Container-specific Chains from Maps
+                    commands.append({ "delete": { "element": {
+                        "family": "ip",
+                        "table": TABLE_FILTER,
+                        "name": cdef.map_name,
+                        "elem": addrs,
+                    }}})
 
             # Remove Container-specific Chains
             for chain in cont_chains:
@@ -154,12 +161,24 @@ class Container:
     def service_manager(self):
         return IPSetManager.instance
 
+    @property
+    def attrs(self):
+        return self.docker_container.attrs
+    
+    @property
+    def labels(self):
+        return self.docker_container.labels
+
     @cached_property
     def service_name(self):
         for k in ["firewhale.service_name", "com.docker.swarm.service.name", "com.docker.compose.service"]:
             if k in self.docker_container.labels:
                 return self.docker_container.labels[k]
         return self.docker_container.attrs["Name"].lstrip("/")
+
+    @cached_property
+    def stack_namespace(self):
+        return self.docker_container.labels.get("com.docker.stack.namespace")
 
     @cached_property
     def docker_container(self):
@@ -171,7 +190,7 @@ class Container:
         firewhale_keys = {}
         for lbl, data in labels.items():
             if lbl.startswith("firewhale."):
-                firewhale_keys[lbl.split(".", 1)[1]] = yaml.parse(data)
+                firewhale_keys[lbl.split(".", 1)[1]] = yaml.safe_load(data)
         return firewhale_keys
 
     @property
@@ -188,7 +207,7 @@ def sync_all_containers(rules = True, ips = True):
         all=True,
     )]
     for container in active_containers:
-        if rules: container.apply_rules()
+        if rules: container.apply_rules() # TODO Ensure container is running
         if ips: container.publish_ips()
 
 def cleanup_unknown_containers():

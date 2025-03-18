@@ -10,9 +10,10 @@ from ..util import BiMultiMap, MultiMap
 from .base import IPSetManager
 
 class RedisSubscriptionManager(IPSetManager):
-    def __init__(self, r) -> None:
+    def __init__(self, r, node_id) -> None:
         super().__init__()
 
+        self.node_id = node_id
         self.redis: redis.Redis = r
 
         # TODO Make this not every container boot?
@@ -23,10 +24,11 @@ class RedisSubscriptionManager(IPSetManager):
 
         self.pubsub = self.redis.pubsub(ignore_subscribe_messages=True)
 
-        # TODO On reconnect:
-        #  - add_service_ip() for all local containers
-        #  - del_unknown_ips()
-        # r.connection.register_connect_callback
+        # def on_reconnect(conn):
+        #     for container in docker.from_env().containers.list(all=True):
+        #         container.publish_ips()
+        #     self.del_unknown_ips()
+        # r.connection.register_connect_callback(on_reconnect)
 
         print("Firewhale is subscribed to Swarm events via Redis")
         self.thread = self.pubsub.run_in_thread(sleep_time=0.1)
@@ -38,13 +40,15 @@ class RedisSubscriptionManager(IPSetManager):
     # === Service IP Publishing ===
 
     def add_service_ip(self, service: str, ip: str, cid: str):
+        print(f"Adding IP {ip} to service {service} for container {cid}")
         return bool(self.redis.fcall("set_ip", 1, ip, service, cid, self.node_id))
 
     def del_service_ip(self, service: str, ip: str, cid: str):
+        print(f"Deleting IP {ip} from service {service} for container {cid}")
         self.redis.fcall("rm_ip", 1, ip, "container", cid)
 
     def del_container_ips(self, cid: str):
-        # print(set(self.redis.smembers(f"container:{cid}:ips")))
+        print(f"Deleting IPs for container {cid}")
         self.redis.fcall("rm_ips_by", 1, cid, "container")
 
     def list_container_ips(self, cid: str) -> Set[str]:
@@ -58,7 +62,7 @@ class RedisSubscriptionManager(IPSetManager):
 
         for ip in redis_state:
             state = self.redis.hgetall(f"ip:{ip}")
-            if state and state["node_id"] == self.node_id:
+            if state and state["node"] == self.node_id:
                 if state["container"] not in local_containers:
                     self.del_service_ip(state["service"], ip, state["container"])
             else:
@@ -79,8 +83,8 @@ class RedisSubscriptionManager(IPSetManager):
 
     def _handle_service_message(self, msg):
         # {'channel': b'my-channel', 'data': b'my data', 'pattern': None, 'type': 'message'}
-        channel = msg["channel"].decode("utf-8")
-        ip = msg["data"].decode("utf-8")
+        channel = msg["channel"]
+        ip = msg["data"]
 
         state = self.redis.hgetall(f"ip:{ip}")
         if state:

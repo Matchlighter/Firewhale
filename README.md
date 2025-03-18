@@ -3,6 +3,8 @@ Firewhale
 
 NFTables rule management for Docker Containers, Docker Compose, and Docker Swarm.
 
+Note that this tool is not perfect and intended more as an extra layer of security rather than as the primary layer. This is due to it's reliance on Docker events - there is a short period of time between a container starting and Firewhale applying rules.
+
 See `./examples/` directory for deployment examples.
 
 ## Architectures
@@ -52,6 +54,9 @@ services:
 Examples:
 - `tcp; *; 80,443`
 - `tcp; *; 80-87`
+- `internet`
+- `local-networks`
+- `!10.0.1.0/24`
 - `tcp; 10.0.0.0/24; 80,443`
 - `tcp; 10.0.0.0-10.0.0.10; 80,443`
 - `tcp; docker_network_name; 80,443`

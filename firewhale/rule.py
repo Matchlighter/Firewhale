@@ -1,7 +1,10 @@
 
 from typing import List, Set
-import docker.models.containers
 import re
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .container import Container
 
 VALID_PROTOCOLS = set(["tcp", "udp"])
 ALIASES = {
@@ -47,14 +50,25 @@ def normalize_rule(rule):
 
     return norm_rule
 
-def full_network_name(container: docker.models.containers.Container, net_name: str):
-    if net_name == "default":
-        for k in ["com.docker.compose.project", "com.docker.stack.namespace"]:
-            if k in container.labels:
-                return container.labels[k] + "_default"
+def full_network_name(container: 'Container', net_name: str):
+    networks = container.attrs["NetworkSettings"]["Networks"]
+
+    for k in networks.keys():
+        if k == net_name: return net_name
+
+    namespace = ""
+    for k in ["com.docker.compose.project", "com.docker.stack.namespace"]:
+        if k in container.labels:
+            namespace = container.labels[k]
+            break
+
+    for k in networks.keys():
+        if k == f"{namespace}_{net_name}":
+            return k
+
     return net_name
 
-def make_nft_rule(rule, container: docker.models.containers.Container, *,
+def make_nft_rule(rule, container: 'Container', *,
     chain=None,
     addr_type: str,
     force_counter: bool = False,
@@ -78,38 +92,91 @@ def make_nft_rule(rule, container: docker.models.containers.Container, *,
 
         # TODO Support IPv6
 
-        if peer == "*":
-            m = None
-        elif re.match(r"^\*\.\w+$", peer):
-            # Network
-            _, net_name = peer.split(".")
-            net_name = full_network_name(container, net_name)
-            nets = container.attrs["NetworkSettings"]["Networks"]
-            if net_name not in nets:
-                raise ValueError(f"Network {net_name} not found")
-            net = net[net_name]
-            m["right"] = { "prefix": { "addr": net["IPAddress"], "length": net["IPPrefixLen"] } }
-        elif re.match(r"^\w+\.\w+$", peer):
-            # Service (Service Name in Swarm/Compose - otherwise Container Name)
-            service_name, net_name = peer.split(".")
-            net_name = full_network_name(container, net_name)
-            peer = f"{service_name}.{net_name}"
-            referenced_services.add(peer)
-            set_name = nft_service_set_name(peer)
-            m["right"] = f"@firewhale-services:{set_name}"
-        elif re.match(r"^\d+\.\d+\.\d+\.\d+(?:\/\d+)$", peer):
-            # IP/CIDR
-            ip, prefix = peer.split("/")
-            if prefix:
-                m["right"] = { "prefix": { "addr": ip, "length": int(prefix) } }
-            else:
-                m["right"] = ip
-        elif re.match(r"^\d+\.\d+\.\d+\.\d+\s*\-\s*\d+\.\d+\.\d+\.\d+$", peer):
-            # IP Range
-            m["right"] = { "range": peer.split("-") }
+        def build_host_matchers():
+            nonlocal m, peer
 
-        if m:
-            nfexprs.append({ "match": m })
+            if peer == "*":
+                m = None
+                return
+
+            invert = False
+
+            if peer.startswith("!"):
+                invert = True
+                peer = peer[1:]
+
+            # Internet
+            if peer == "internet":
+                invert = not invert
+                peer = "local-networks"
+
+            if invert:
+                m["op"] = "!="
+
+            # Local Networks
+            if peer == "local-networks":
+                nets = ['10.0.0.0/8', '192.168.0.0/16', '172.16.0.0/12']
+                for n in nets:
+                    addr, prefix = n.split("/")
+                    nfexprs.append({ "match": {
+                        **m,
+                        "right": { "prefix": { "addr": addr, "len": int(prefix) } }
+                    } })
+                return
+
+            # Network
+            match = re.match(r"^\*\.(\w+)$", peer)
+            if match:
+                net_name, = match.groups()
+                net_name = full_network_name(container, net_name)
+                nets = container.attrs["NetworkSettings"]["Networks"]
+                if net_name not in nets:
+                    raise ValueError(f"Network {net_name} not found")
+                net = net[net_name]
+                m["right"] = { "prefix": { "addr": net["IPAddress"], "len": net["IPPrefixLen"] } }
+
+                nfexprs.append({ "match": m })
+                return
+
+            # Service (Service Name in Swarm/Compose - otherwise Container Name)
+            match = re.match(r"^(?:(\w+):)?(\w+)\.(\w+)$", peer)
+            if match:
+                ns, service_name, net_name = match.groups()
+
+                if not ns: ns = container.stack_namespace
+                if ns:
+                    service_name = f"{ns}_{service_name}"
+
+                net_name = full_network_name(container, net_name)
+                peer = f"{service_name}.{net_name}"
+                referenced_services.add(peer)
+                set_name = nft_service_set_name(peer)
+                m["right"] = f"@{set_name}"
+
+                nfexprs.append({ "match": m })
+                return
+
+            # IP/CIDR
+            match = re.match(r"^(\d+\.\d+\.\d+\.\d+)(?:\/(\d+))$", peer)
+            if match:
+                ip, prefix = match.groups()
+                if prefix:
+                    m["right"] = { "prefix": { "addr": ip, "len": int(prefix) } }
+                else:
+                    m["right"] = ip
+
+                nfexprs.append({ "match": m })
+                return
+
+            # IP Range
+            match = re.match(r"^(\d+\.\d+\.\d+\.\d+)\s*\-\s*(\d+\.\d+\.\d+\.\d+)$", peer)
+            if match:
+                m["right"] = { "range": peer.split("-") }
+
+                nfexprs.append({ "match": m })
+                return
+
+        build_host_matchers()
 
     if "src_port" in rule:
         nfexprs.append({ "match": {

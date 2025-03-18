@@ -1,4 +1,5 @@
 
+import traceback
 from functools import wraps
 from typing import Dict, Generic, TypeVar, Set
 
@@ -62,13 +63,17 @@ class BiMultiMap(Generic[T, U]):
         return self._left.remove(key, value)
 
 
-def protected(message):
+def protected(message, *, short=[]):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
             try:
                 func(*args, **kwargs)
             except Exception as e:
-                print(f"{message}: {e}")
+                if any(isinstance(e, exc) for exc in short):
+                    print(f"{message}: {e}")
+                else:
+                    print(f"{message}:")
+                    print(traceback.format_exc())
         return wrapper
     return decorator

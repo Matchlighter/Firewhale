@@ -9,6 +9,7 @@ class IPSetManager:
     instance: "IPSetManager" = None
 
     def __init__(self) -> None:
+        self.node_id = "LOCAL"
         # Service <-> Container
         self.service_subscriptions: BiMultiMap[str, str] = BiMultiMap()
         self.ip_service_cache: Dict[str, str] = {}
@@ -41,17 +42,28 @@ class IPSetManager:
 
     def subscribe_service(self, service: str, cid: str):
         """ Returns True if the Service was not already subscribed """
+        print(f"Subscribing to service {service} for container {cid}")
         if self.service_subscriptions.add(service, cid):
-            nfc({ "add": { "set": {
-                **self._service_set(service),
-                "type": "ipv4_addr",
-                "elem": list(self.list_service_ips(service)),
-            }}})
+            print(f"Subscription is new - subscribing")
+            ips = list(self.list_service_ips(service))
+            if len(ips) > 0:
+                nfc({ "add": { "set": {
+                    **self._service_set(service),
+                    "type": "ipv4_addr",
+                    "elem": ips,
+                }}})
+            else:
+                nfc({ "add": { "set": {
+                    **self._service_set(service),
+                    "type": "ipv4_addr",
+                }}})
             return True
 
     def unsubscribe_service(self, service: str, cid: str):
         """ Returns True if the service has no remaining Subscribers """
+        print(f"Unsubscribing from service {service} for container {cid}")
         if self.service_subscriptions.remove(service, cid):
+            print(f"Subscription is empty - unsubscribing")
             nfc({ "delete": { "set": {
                 **self._service_set(service),
             }}})
@@ -61,11 +73,12 @@ class IPSetManager:
         if not self.service_subscriptions.has_value(cid):
             return
 
-        services = self.service_subscriptions.get_by_value(cid)
+        services = list(self.service_subscriptions.get_by_value(cid))
         for svc in services:
             self.unsubscribe_service(svc, cid)
 
     def _update_ip_service(self, service: str, ip: str):
+        if not ip or ip == "": return
         if not self.service_subscriptions.has_key(service): return
 
         # Remove the IP from the old service (if applicable)
@@ -92,7 +105,3 @@ class IPSetManager:
             "table": "filter",
             "name": nft_service_set_name(service),
         }
-
-    @property
-    def node_id(self) -> str:
-        return "TODO"
